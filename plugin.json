@@ -1,0 +1,17 @@
+{
+  "id": "ntfy-channel",
+  "name": "ntfy Channel",
+  "version": "0.1.0",
+  "type": "channel",
+  "description": "ntfy push notification channel (self-hosted or ntfy.sh). Inbound via JSON stream, outbound via HTTP PUT, with byte-safe chunking and extra-topic broadcast.",
+  "author": "xiaopa",
+  "entry": {
+    "backend": "plugin.py"
+  },
+  "repository": "https://github.com/Mcpy/qwenpaw-ntfy-channel",
+  "dependencies": ["httpx>=0.24.0"],
+  "qwenpaw_version": {
+    "min": "1.1.5",
+    "max": "2.1.0"
+  }
+}

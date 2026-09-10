@@ -122,45 +122,9 @@ class NtfyChannelPlugin:
                         "en": "Tag attached to outbound messages for loop prevention. Use distinct tags per agent when sharing an ntfy server",
                     },
                 },
-                {
-                    "name": "show_tool_calls",
-                    "label": {"zh": "显示工具调用", "en": "Show tool calls"},
-                    "type": "switch",
-                    "required": False,
-                    "default": True,
-                    "help": {
-                        "zh": "回复中包含工具调用过程(与内置频道默认一致)",
-                        "en": "Include tool call activity in replies",
-                    },
-                },
-                {
-                    "name": "show_tool_results",
-                    "label": {"zh": "显示工具结果", "en": "Show tool results"},
-                    "type": "switch",
-                    "required": False,
-                    "default": True,
-                },
-                {
-                    "name": "show_thinking",
-                    "label": {"zh": "显示思考过程", "en": "Show thinking"},
-                    "type": "switch",
-                    "required": False,
-                    "default": True,
-                },
-                {
-                    "name": "tool_call_max_length",
-                    "label": {"zh": "工具调用预览长度", "en": "Tool call preview length"},
-                    "type": "number",
-                    "required": False,
-                    "default": 200,
-                },
-                {
-                    "name": "tool_result_max_length",
-                    "label": {"zh": "工具结果预览长度", "en": "Tool result preview length"},
-                    "type": "number",
-                    "required": False,
-                    "default": 500,
-                },
+                # 显示开关(show_tool_calls/show_tool_results/show_thinking
+                # 及预览长度)由控制台 ChannelDrawer 通用区块渲染,
+                # 此处不再声明,否则 UI 会出现重复开关
                 {
                     "name": "bot_prefix",
                     "label": {"zh": "消息前缀", "en": "Bot prefix"},

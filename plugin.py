@@ -112,14 +112,25 @@ class NtfyChannelPlugin:
                 },
                 {
                     "name": "bot_tag",
-                    "label": {"zh": "回环防护标签", "en": "Echo tag"},
+                    "label": {"zh": "防护/寻址标签", "en": "Echo tag"},
                     "type": "text",
                     "required": False,
                     "placeholder": "qwenpaw-bot",
                     "default": "qwenpaw-bot",
                     "help": {
-                        "zh": "本 agent 出站消息的标记 tag,入站见此 tag 即过滤以防回环。多个 agent 共用 ntfy 服务器时,各自配置不同 tag(如 qwenpaw-bot-cpy / qwenpaw-bot-trader),避免互相吞消息",
-                        "en": "Tag attached to outbound messages for loop prevention. Use distinct tags per agent when sharing an ntfy server",
+                        "zh": "逗号分隔列表:第一个为身份 tag(出站标记与 @ 寻址地址),全部用于入站过滤(自己的消息 + 已知 agent 的标记)。多 agent 共用 ntfy 时互相把对方 tag 加进列表即可隔离",
+                        "en": "Comma-separated: first is identity tag (outbound marking & @ address), all are used for inbound filtering. Add other agents' tags to isolate",
+                    },
+                },
+                {
+                    "name": "require_mention",
+                    "label": {"zh": "仅响应 @ 提及", "en": "Require @ mention"},
+                    "type": "switch",
+                    "required": False,
+                    "default": False,
+                    "help": {
+                        "zh": "开启后仅处理 @自己 的消息(如 @qwenpaw-bot 你好);多 agent 共用 topic 时建议副 agent 开启",
+                        "en": "When enabled, only messages mentioning this agent's tag are processed",
                     },
                 },
                 # 显示开关(show_tool_calls/show_tool_results/show_thinking
@@ -143,8 +154,7 @@ class NtfyChannelPlugin:
                     "required": False,
                     "default": False,
                     "help": FIELD_HELP_ACL,
-                },
-            ],
+                },            ],
         )
         logger.info("✓ ntfy channel registered")
 

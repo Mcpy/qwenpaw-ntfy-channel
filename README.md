@@ -13,7 +13,10 @@
 ## 功能特性
 
 - **收发分离路由**:应答只推送到「推送 topic」(广播),不回消息来源 topic;订阅 topic 与推送 topic 可任意组合
-- **回环防护**:出站消息自动携带可配置的回环标记 tag(基于 ntfy 官方 Tags 字段),入站检测到即过滤,收发同 topic 也不会死循环
+- **回环防护**:出站消息自动携带身份 tag(基于 ntfy 官方 Tags 字段),入站检测到即过滤,收发同 topic 也不会死循环
+- **@ 寻址**:消息中 `@<bot_tag>` 定向呼叫特定 agent(支持任意位置、@ 多个、大小写不敏感、整词匹配)
+- **仅响应 @ 提及**(`require_mention`):多 agent 共用 topic 时,副 agent 开启后只响应被点名的消息
+- **多 agent 隔离**:`bot_tag` 支持逗号分隔列表(第一个为身份 tag,全部用于入站过滤),互相把对方 tag 加入列表即完成隔离
 - **UTF-8 字节安全分片**:长回复按字节上限自动分片(优先断在换行、回退字符边界),中文/emoji 不截断不乱码
 - **三种运行形态**(配置即切换):
   - 双向对话(订阅 + 推送)
@@ -44,7 +47,8 @@ qwenpaw plugin install ./qwenpaw-ntfy-channel
 | `subscribe_topics` | text | — | 入站订阅 topic,逗号分隔;留空 = 纯通知出口 |
 | `push_topics` | text | — | 出站推送 topic,逗号分隔广播;应答与定时任务均只推送到这里 |
 | `enable_outbound` | switch | 开 | 关闭后输出不推送(纯接收入口) |
-| `bot_tag` | text | `qwenpaw-bot` | 回环防护标记;多 agent 共用 ntfy 服务器时各自配置不同 tag,避免互相吞消息 |
+| `bot_tag` | text | `qwenpaw-bot` | 逗号分隔列表:第一个为身份 tag(出站标记与 @ 寻址地址),全部用于入站过滤;多 agent 共用 ntfy 时互相把对方 tag 加进列表 |
+| `require_mention` | switch | 关 | 开启后仅处理 `@自己` 的消息;多 agent 共用 topic 时建议副 agent 开启 |
 | `max_message_bytes` | number | 4000 | 单条消息 UTF-8 字节上限,超出自动分片 |
 | `bot_prefix` | text | — | 回复消息前缀 |
 | `access_control_dm` | switch | 关 | 开启后新 topic 首条消息需在控制台审批 |
@@ -63,6 +67,15 @@ python tests/test_loop.py
 ```
 
 测试覆盖:出站消息零入站(回环防护)、外部消息正常入站、应答零回流、长文本分片。
+
+## 多 agent 场景
+
+| 场景 | 推荐配置 |
+|---|---|
+| 多 agent 各管各的(推荐) | 收发分离:每个 agent 订阅/推送各自的 topic,天然隔离 |
+| 多 agent 共用一个 topic | 各配不同的 `bot_tag`,并互相把对方 tag 加入自己的过滤列表;副 agent 开 `require_mention`,用户用 `@<tag>` 定向呼叫 |
+
+**诚实边界**:ntfy 不提供消息发送者身份(平台级无 `author.bot` 之类字段),对于不携带任何 tag 的第三方 agent(无法从消息层与人类区分),只能靠 topic 拓扑分离隔离——这也是 Telegram 靠平台屏蔽 bot 消息、Discord 靠 `author.bot` 字段才能做到的事。
 
 ## 设计说明
 

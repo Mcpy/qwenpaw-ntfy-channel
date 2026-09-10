@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional, Union
 
 import httpx
@@ -46,11 +47,17 @@ PUT_TIMEOUT = 10.0
 STREAM_READ_TIMEOUT = 90.0
 # 重连退避上限(秒)
 RECONNECT_BACKOFF_MAX = 30.0
-# 回环防护标记的默认值:经本频道发出的消息统一带此 tag,
+# 回环防护/寻址 tag 的默认值:经本频道发出的消息统一带此 tag,
 # 入站检测到即跳过(利用 ntfy 官方 Tags 字段,发布/订阅两端原样保留)。
-# 可通过配置项 bot_tag 覆盖——多个 agent 共用同一 ntfy 服务器时,
-# 各自配置不同的 bot_tag,避免把对方的消息误判为自己发的。
+# 可通过配置项 bot_tag 覆盖(逗号分隔列表:第一个为身份 tag,
+# 全部用于入站过滤)——多个 agent 共用同一 ntfy 服务器时,各自配置
+# 不同 tag 并互相把对方加入过滤列表。
 DEFAULT_BOT_TAG = "qwenpaw-bot"
+# tag 合法字符:与 ntfy topic 字符集一致(URL/日志/正则中安全)
+_TAG_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# @ 寻址提取:整词提取(tag 后遇非法字符即截断),支持 @ 多个、
+# 大小写不敏感;@ 与 tag 之间不能有空格,使用半角 @
+_AT_PATTERN = re.compile(r"@([A-Za-z0-9_-]+)")
 
 
 class NtfyChannel(BaseChannel):
@@ -70,6 +77,7 @@ class NtfyChannel(BaseChannel):
         enable_outbound: bool = True,
         max_message_bytes: int = 4000,
         bot_tag: str = "",
+        require_mention: bool = False,
         bot_prefix: str = "",
         on_reply_sent: OnReplySent = None,
         display_config: ChannelDisplayConfig | None = None,
@@ -104,12 +112,15 @@ class NtfyChannel(BaseChannel):
         except (TypeError, ValueError):
             self.max_message_bytes = 4000
 
-        # 回环防护 tag:空值回退默认(回环防护不允许关闭)
-        self.bot_tag = (bot_tag or "").strip() or DEFAULT_BOT_TAG
-        if self.bot_tag != (bot_tag or "").strip():
-            logger.warning(
-                "ntfy: empty bot_tag, falling back to %r", self.bot_tag,
-            )
+        # 回环防护 tag 列表(逗号分隔):
+        #   第一个 = 身份 tag(出站 Tags header / @ 寻址的地址)
+        #   全部   = 入站过滤集合(自己的消息 + 已知外部 agent 的标记)
+        # 空值回退默认;非法字符 tag 丢弃;全部无效时回退默认(防护不可关闭)
+        self._tag_list = self._parse_bot_tags(bot_tag)
+        self.bot_tag = self._tag_list[0]
+        self._tag_set = {t.lower() for t in self._tag_list}
+        # 群聊寻址开关(对齐内置频道语义):开启后仅响应 @自己 的消息
+        self.require_mention = bool(require_mention)
 
         # 逗号分隔 → 列表(去空、去重、保序)
         self._subscribe_list = self._parse_topics(subscribe_topics)
@@ -152,6 +163,7 @@ class NtfyChannel(BaseChannel):
                 enable_outbound=bool(config.get("enable_outbound", True)),
                 max_message_bytes=config.get("max_message_bytes", 4000),
                 bot_tag=(config.get("bot_tag") or "").strip(),
+                require_mention=bool(config.get("require_mention", False)),
                 bot_prefix=(config.get("bot_prefix") or "").strip(),
                 on_reply_sent=on_reply_sent,
                 display_config=display_config
@@ -178,6 +190,7 @@ class NtfyChannel(BaseChannel):
             enable_outbound=bool(getattr(config, "enable_outbound", True)),
             max_message_bytes=getattr(config, "max_message_bytes", 4000),
             bot_tag=(getattr(config, "bot_tag", "") or "").strip(),
+            require_mention=bool(getattr(config, "require_mention", False)),
             bot_prefix=(getattr(config, "bot_prefix", "") or "").strip(),
             on_reply_sent=on_reply_sent,
             display_config=display_config
@@ -248,6 +261,34 @@ class NtfyChannel(BaseChannel):
             if t and t not in seen:
                 seen.append(t)
         return seen
+
+    def _parse_bot_tags(self, raw: str) -> List[str]:
+        """解析 bot_tag 配置(逗号分隔列表,第一个为身份 tag)。
+
+        非法 tag(字符集/长度)丢弃并警告;全部无效或为空时
+        回退默认——回环防护不允许关闭。
+        """
+        tags: List[str] = []
+        for part in (raw or "").split(","):
+            t = part.strip()
+            if not t:
+                continue
+            if not _TAG_PATTERN.match(t):
+                logger.warning(
+                    "ntfy: invalid bot_tag %r dropped (allowed: letters, "
+                    "digits, underscore, hyphen; max 64 chars)", t,
+                )
+                continue
+            if t not in tags:
+                tags.append(t)
+        if not tags:
+            if (raw or "").strip():
+                logger.warning(
+                    "ntfy: no valid bot_tag in %r, falling back to %r",
+                    raw, DEFAULT_BOT_TAG,
+                )
+            tags = [DEFAULT_BOT_TAG]
+        return tags
 
     def _auth_headers(self) -> Dict[str, str]:
         if self.token:
@@ -325,19 +366,44 @@ class NtfyChannel(BaseChannel):
         if event != "message":
             return  # open / keepalive / poll_request 等
 
-        # 回环防护:出站消息统一带 self.bot_tag,见此 tag 即为自己发的,丢弃。
-        # 这是唯一判定:tag 由 ntfy 官方字段承载,实时流与断线回放均原样保留,
-        # 用户手打消息不可能带此 tag,永不误滤。
+        # ── 回环防护与寻址(定稿管线)──
+        # 1) 硬层:消息 tags 与自己的 tag 集合有交集 → 自己发的
+        #    或已知 agent 的消息,丢弃。tag 由 ntfy 官方字段承载,
+        #    实时流与断线回放均原样保留;用户手打消息不可能携带。
         tags = obj.get("tags") or []
-        if isinstance(tags, list) and self.bot_tag in tags:
+        incoming_tags = (
+            {str(t).lower() for t in tags} if isinstance(tags, list) else set()
+        )
+        if incoming_tags & self._tag_set:
             logger.debug(
-                "ntfy: skip own message %s (tag=%s)", msg_id, self.bot_tag,
+                "ntfy: skip agent message %s (tag match)", msg_id,
             )
             return
 
-        topic = str(obj.get("topic") or "").strip()
         text = str(obj.get("message") or "").strip()
-        if not topic or not text:
+        if not text:
+            return
+
+        # 2) @ 寻址(协议级,优先于 require_mention):
+        #    正文含 @目标 时,仅被点名的 agent 处理。
+        at_targets = {
+            m.group(1).lower() for m in _AT_PATTERN.finditer(text)
+        }
+        if at_targets:
+            if not (at_targets & self._tag_set):
+                logger.debug(
+                    "ntfy: message %s addressed to %s, not me",
+                    msg_id, sorted(at_targets),
+                )
+                return  # 定向给别人的,不接
+            # 被 @ → 认领(正文原样保留,agent 读得懂称呼)
+        elif self.require_mention:
+            # 3) 无 @ 的广播消息:require_mention 开启时静默跳过
+            logger.debug("ntfy: skip unaddressed message %s", msg_id)
+            return
+
+        topic = str(obj.get("topic") or "").strip()
+        if not topic:
             return
         if topic not in self._subscribe_list:
             return  # 服务器多 topic 订阅时的保险过滤

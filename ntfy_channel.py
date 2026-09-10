@@ -76,7 +76,9 @@ class NtfyChannel(BaseChannel):
         push_topics: str = "",
         enable_outbound: bool = True,
         max_message_bytes: int = 4000,
-        bot_tag: str = "",
+        identity_tag: str = "",
+        filter_tags: str = "",
+        bot_tag: str = "",  # 已废弃,兼容旧配置;等价于 identity_tag+filter_tags
         require_mention: bool = False,
         bot_prefix: str = "",
         on_reply_sent: OnReplySent = None,
@@ -99,11 +101,11 @@ class NtfyChannel(BaseChannel):
         self.server_url = (server_url or "").strip().rstrip("/")
         self.token = (token or "").strip()
         self.subscribe_topics = subscribe_topics or ""
+        self.enable_outbound = bool(enable_outbound)
         # push_topics 为空时回退旧字段名 extra_topics(向后兼容)
         self.push_topics = (push_topics or "").strip() or (
             extra_topics or ""
         ).strip()
-        self.enable_outbound = bool(enable_outbound)
 
         try:
             self.max_message_bytes = max(
@@ -112,13 +114,39 @@ class NtfyChannel(BaseChannel):
         except (TypeError, ValueError):
             self.max_message_bytes = 4000
 
-        # 回环防护 tag 列表(逗号分隔):
-        #   第一个 = 身份 tag(出站 Tags header / @ 寻址的地址)
-        #   全部   = 入站过滤集合(自己的消息 + 已知外部 agent 的标记)
-        # 空值回退默认;非法字符 tag 丢弃;全部无效时回退默认(防护不可关闭)
-        self._tag_list = self._parse_bot_tags(bot_tag)
-        self.bot_tag = self._tag_list[0]
-        self._tag_set = {t.lower() for t in self._tag_list}
+        # 回环防护/寻址 tag(拆分身份与过滤,正交配置):
+        #   identity_tag = 身份 tag(出站 Tags header、@ 寻址的地址)
+        #   filter_tags  = 额外过滤标记(已知外部 agent 的 tag,逗号分隔)
+        # 入站过滤集 = {identity} ∪ filter_tags(自动含自己,防漏配自回环)
+        # @ 认领集合 = {identity}
+        # 兼容:identity_tag 为空时回退读旧字段 bot_tag(逗号分隔,
+        # 第一个为身份、其余并入过滤),再空则回退默认。防护不可关闭。
+        compat_tags = self._parse_bot_tags(bot_tag) if (bot_tag or "").strip() else []
+        identity = (identity_tag or "").strip() or (
+            compat_tags[0] if compat_tags else DEFAULT_BOT_TAG
+        )
+        if not _TAG_PATTERN.match(identity):
+            if identity:
+                logger.warning(
+                    "ntfy: invalid identity_tag %r, falling back to %r",
+                    identity, DEFAULT_BOT_TAG,
+                )
+            identity = DEFAULT_BOT_TAG
+        self.identity = identity
+        self.bot_tag = identity  # 兼容属性名(测试/旧引用)
+        self._filter_extra = [
+            t for t in self._parse_bot_tags(filter_tags)
+            if t.lower() != identity.lower()
+        ]
+        # 旧字段 bot_tag 的其余元素(身份之外)并入过滤集,完整兼容 v0.2.0
+        for t in compat_tags[1:]:
+            if t.lower() == identity.lower():
+                continue
+            if t.lower() not in {e.lower() for e in self._filter_extra}:
+                self._filter_extra.append(t)
+        self._tag_set = {identity.lower()} | {
+            t.lower() for t in self._filter_extra
+        }
         # 群聊寻址开关(对齐内置频道语义):开启后仅响应 @自己 的消息
         self.require_mention = bool(require_mention)
 
@@ -162,6 +190,8 @@ class NtfyChannel(BaseChannel):
                              or "").strip(),
                 enable_outbound=bool(config.get("enable_outbound", True)),
                 max_message_bytes=config.get("max_message_bytes", 4000),
+                identity_tag=(config.get("identity_tag") or "").strip(),
+                filter_tags=(config.get("filter_tags") or "").strip(),
                 bot_tag=(config.get("bot_tag") or "").strip(),
                 require_mention=bool(config.get("require_mention", False)),
                 bot_prefix=(config.get("bot_prefix") or "").strip(),
@@ -189,6 +219,8 @@ class NtfyChannel(BaseChannel):
             ).strip(),
             enable_outbound=bool(getattr(config, "enable_outbound", True)),
             max_message_bytes=getattr(config, "max_message_bytes", 4000),
+            identity_tag=(getattr(config, "identity_tag", "") or "").strip(),
+            filter_tags=(getattr(config, "filter_tags", "") or "").strip(),
             bot_tag=(getattr(config, "bot_tag", "") or "").strip(),
             require_mention=bool(getattr(config, "require_mention", False)),
             bot_prefix=(getattr(config, "bot_prefix", "") or "").strip(),
@@ -263,11 +295,7 @@ class NtfyChannel(BaseChannel):
         return seen
 
     def _parse_bot_tags(self, raw: str) -> List[str]:
-        """解析 bot_tag 配置(逗号分隔列表,第一个为身份 tag)。
-
-        非法 tag(字符集/长度)丢弃并警告;全部无效或为空时
-        回退默认——回环防护不允许关闭。
-        """
+        """解析逗号分隔 tag 列表(纯解析:校验+去重,空输入返回空列表)。"""
         tags: List[str] = []
         for part in (raw or "").split(","):
             t = part.strip()
@@ -281,13 +309,6 @@ class NtfyChannel(BaseChannel):
                 continue
             if t not in tags:
                 tags.append(t)
-        if not tags:
-            if (raw or "").strip():
-                logger.warning(
-                    "ntfy: no valid bot_tag in %r, falling back to %r",
-                    raw, DEFAULT_BOT_TAG,
-                )
-            tags = [DEFAULT_BOT_TAG]
         return tags
 
     def _auth_headers(self) -> Dict[str, str]:
@@ -386,11 +407,12 @@ class NtfyChannel(BaseChannel):
 
         # 2) @ 寻址(协议级,优先于 require_mention):
         #    正文含 @目标 时,仅被点名的 agent 处理。
+        #    认领集合 = 身份 tag(过滤列表里的外部标记不是自己的名字)
         at_targets = {
             m.group(1).lower() for m in _AT_PATTERN.finditer(text)
         }
         if at_targets:
-            if not (at_targets & self._tag_set):
+            if self.identity.lower() not in at_targets:
                 logger.debug(
                     "ntfy: message %s addressed to %s, not me",
                     msg_id, sorted(at_targets),
@@ -477,7 +499,7 @@ class NtfyChannel(BaseChannel):
         try:
             client = await self._get_http()
             headers = self._auth_headers()
-            headers["Tags"] = self.bot_tag  # 出站标记,供入站回环过滤
+            headers["Tags"] = self.identity  # 出站身份标记,供入站回环过滤
             resp = await client.put(
                 f"{self.server_url}/{topic}",
                 content=text.encode("utf-8"),

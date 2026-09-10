@@ -47,8 +47,9 @@ qwenpaw plugin install ./qwenpaw-ntfy-channel
 | `subscribe_topics` | text | — | 入站订阅 topic,逗号分隔;留空 = 纯通知出口 |
 | `push_topics` | text | — | 出站推送 topic,逗号分隔广播;应答与定时任务均只推送到这里 |
 | `enable_outbound` | switch | 开 | 关闭后输出不推送(纯接收入口) |
-| `bot_tag` | text | `qwenpaw-bot` | 逗号分隔列表:第一个为身份 tag(出站标记与 @ 寻址地址),全部用于入站过滤;多 agent 共用 ntfy 时互相把对方 tag 加进列表 |
-| `require_mention` | switch | 关 | 开启后仅处理 `@自己` 的消息;多 agent 共用 topic 时建议副 agent 开启 |
+| `identity_tag` | text | `qwenpaw-bot` | 身份 tag:出站消息自动携带,也是 @ 寻址的地址(如 `@qwenpaw-bot`) |
+| `filter_tags` | text | — | 额外过滤标记(逗号分隔):携带这些 tag 的消息将被忽略;自己的身份 tag 自动包含,多 agent 共用 topic 时把其他 agent 的身份 tag 加进来 |
+| `require_mention` | switch | 关 | 需要 @提及:开启后仅处理 `@自己` 的消息;多 agent 共用 topic 时建议副 agent 开启 |
 | `max_message_bytes` | number | 4000 | 单条消息 UTF-8 字节上限,超出自动分片 |
 | `bot_prefix` | text | — | 回复消息前缀 |
 | `access_control_dm` | switch | 关 | 开启后新 topic 首条消息需在控制台审批 |

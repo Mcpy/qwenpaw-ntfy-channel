@@ -1,7 +1,7 @@
 {
   "id": "ntfy-channel",
   "name": "ntfy Channel",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "channel",
   "description": "ntfy push notification channel (self-hosted or ntfy.sh). Inbound via JSON stream, outbound via HTTP PUT, with byte-safe chunking and extra-topic broadcast.",
   "author": "xiaopa",

@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional, Union
 
 import httpx
@@ -58,6 +59,14 @@ _TAG_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # @ 寻址提取:整词提取(tag 后遇非法字符即截断),支持 @ 多个、
 # 大小写不敏感;@ 与 tag 之间不能有空格,使用半角 @
 _AT_PATTERN = re.compile(r"@([A-Za-z0-9_-]+)")
+# 入站消息 id 去重:防断线重连时 since 重放导致同一消息重复入站。
+# 超过上限时按窗口清理过期记录。
+_DEDUP_WINDOW_SECONDS = 300.0
+_DEDUP_MAX_SIZE = 1000
+# 流连接的确定性致命状态:服务器活着且明确拒绝(认证/ACL/topic 不存在),
+# 重试不可能自愈 → 停止重连循环(修复配置后热重载恢复)。
+# 5xx/网络错误属瞬态,仍走退避重试。
+_FATAL_STREAM_STATUS = (401, 403, 404)
 
 
 class NtfyChannel(BaseChannel):
@@ -80,6 +89,7 @@ class NtfyChannel(BaseChannel):
         filter_tags: str = "",
         bot_tag: str = "",  # 已废弃,兼容旧配置;等价于 identity_tag+filter_tags
         require_mention: bool = False,
+        markdown: bool = False,
         bot_prefix: str = "",
         on_reply_sent: OnReplySent = None,
         display_config: ChannelDisplayConfig | None = None,
@@ -149,6 +159,9 @@ class NtfyChannel(BaseChannel):
         }
         # 群聊寻址开关(对齐内置频道语义):开启后仅响应 @自己 的消息
         self.require_mention = bool(require_mention)
+        # 出站 markdown 渲染(X-Markdown: true;ntfy 手机/桌面 app 支持
+        # 粗体/列表/代码块子集;旧客户端忽略此 header 无害降级)
+        self.markdown = bool(markdown)
 
         # 逗号分隔 → 列表(去空、去重、保序)
         self._subscribe_list = self._parse_topics(subscribe_topics)
@@ -159,6 +172,8 @@ class NtfyChannel(BaseChannel):
         self._stop_event: Optional[asyncio.Event] = None
         # 最后收到的消息 id,断线重连作为 since 参数续传
         self._last_since: str = ""
+        # 入站消息 id 去重表:msg_id -> monotonic 时间戳
+        self._seen_msgs: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # 工厂
@@ -194,6 +209,7 @@ class NtfyChannel(BaseChannel):
                 filter_tags=(config.get("filter_tags") or "").strip(),
                 bot_tag=(config.get("bot_tag") or "").strip(),
                 require_mention=bool(config.get("require_mention", False)),
+                markdown=bool(config.get("markdown", False)),
                 bot_prefix=(config.get("bot_prefix") or "").strip(),
                 on_reply_sent=on_reply_sent,
                 display_config=display_config
@@ -223,6 +239,7 @@ class NtfyChannel(BaseChannel):
             filter_tags=(getattr(config, "filter_tags", "") or "").strip(),
             bot_tag=(getattr(config, "bot_tag", "") or "").strip(),
             require_mention=bool(getattr(config, "require_mention", False)),
+            markdown=bool(getattr(config, "markdown", False)),
             bot_prefix=(getattr(config, "bot_prefix", "") or "").strip(),
             on_reply_sent=on_reply_sent,
             display_config=display_config
@@ -346,14 +363,16 @@ class NtfyChannel(BaseChannel):
                     "GET", url, params=params,
                     headers=self._auth_headers(),
                 ) as resp:
-                    if resp.status_code in (401, 403):
+                    if resp.status_code in _FATAL_STREAM_STATUS:
+                        # 确定性拒绝(认证/ACL/topic 不存在):重试不可能
+                        # 自愈,停止重连循环。修复配置后保存触发热重载恢复。
                         logger.error(
-                            "ntfy stream auth failed (%s): check token / "
-                            "topic ACL", resp.status_code,
+                            "ntfy stream fatal (%s): %s — stopping reconnect "
+                            "loop. Check token / topic ACL / topic names, then "
+                            "reload the channel config to retry.",
+                            resp.status_code, url,
                         )
-                        await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, RECONNECT_BACKOFF_MAX)
-                        continue
+                        return
                     resp.raise_for_status()
                     logger.info("ntfy stream connected: %s", url)
                     backoff = 1.0
@@ -378,6 +397,19 @@ class NtfyChannel(BaseChannel):
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, RECONNECT_BACKOFF_MAX)
 
+    def _is_duplicate(self, msg_id: str) -> bool:
+        """入站消息 id 去重:窗口内重复的 id 返回 True(防重连重放)。"""
+        now = time.monotonic()
+        if len(self._seen_msgs) > _DEDUP_MAX_SIZE:
+            cutoff = now - _DEDUP_WINDOW_SECONDS
+            self._seen_msgs = {
+                k: v for k, v in self._seen_msgs.items() if v > cutoff
+            }
+        if msg_id in self._seen_msgs:
+            return True
+        self._seen_msgs[msg_id] = now
+        return False
+
     def _handle_stream_event(self, obj: Dict[str, Any]) -> None:
         event = obj.get("event")
         msg_id = str(obj.get("id") or "")
@@ -386,6 +418,11 @@ class NtfyChannel(BaseChannel):
 
         if event != "message":
             return  # open / keepalive / poll_request 等
+
+        # 去重:重连重放/重复投递的同一 id 只处理一次
+        if msg_id and self._is_duplicate(msg_id):
+            logger.debug("ntfy: duplicate message %s skipped", msg_id)
+            return
 
         # ── 回环防护与寻址(定稿管线)──
         # 1) 硬层:消息 tags 与自己的 tag 集合有交集 → 自己发的
@@ -500,6 +537,8 @@ class NtfyChannel(BaseChannel):
             client = await self._get_http()
             headers = self._auth_headers()
             headers["Tags"] = self.identity  # 出站身份标记,供入站回环过滤
+            if self.markdown:
+                headers["X-Markdown"] = "true"
             resp = await client.put(
                 f"{self.server_url}/{topic}",
                 content=text.encode("utf-8"),

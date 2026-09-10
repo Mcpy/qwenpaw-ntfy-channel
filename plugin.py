@@ -144,6 +144,17 @@ class NtfyChannelPlugin:
                         "en": "When enabled, only messages mentioning this agent's tag are processed",
                     },
                 },
+                {
+                    "name": "markdown",
+                    "label": {"zh": "Markdown 渲染", "en": "Markdown rendering"},
+                    "type": "switch",
+                    "required": False,
+                    "default": False,
+                    "help": {
+                        "zh": "出站消息携带 X-Markdown: true,ntfy 客户端将渲染粗体/列表/代码块(旧客户端忽略此头,显示原文)。注意:长消息分片时代码块可能跨片导致渲染异常",
+                        "en": "Outbound messages carry X-Markdown: true so ntfy clients render bold/lists/code blocks. Legacy clients ignore it. Note: code blocks may split across chunk boundaries",
+                    },
+                },
                 # 显示开关(show_tool_calls/show_tool_results/show_thinking
                 # 及预览长度)由控制台 ChannelDrawer 通用区块渲染,
                 # 此处不再声明,否则 UI 会出现重复开关

@@ -50,6 +50,9 @@ qwenpaw plugin install ./qwenpaw-ntfy-channel
 | `identity_tag` | text | `qwenpaw-bot` | 身份 tag:出站消息自动携带,也是 @ 寻址的地址(如 `@qwenpaw-bot`) |
 | `filter_tags` | text | — | 额外过滤标记(逗号分隔):携带这些 tag 的消息将被忽略;自己的身份 tag 自动包含,多 agent 共用 topic 时把其他 agent 的身份 tag 加进来 |
 | `require_mention` | switch | 关 | 需要 @提及:开启后仅处理 `@自己` 的消息;多 agent 共用 topic 时建议副 agent 开启 |
+| `markdown` | switch | 关 | 出站携带 `X-Markdown: true`,ntfy 客户端渲染粗体/列表/代码块;旧客户端无害降级显示原文。长消息分片时代码块可能跨片 |
+
+**可靠性细节**:入站按消息 id 去重(300 秒窗口,防断线重连重放);流连接遇 401/403/404(认证/ACL/topic 不存在等确定性拒绝)停止重连循环并在日志报 fatal,修复配置后保存触发热重载恢复;5xx/网络错误仍指数退避重试。
 | `max_message_bytes` | number | 4000 | 单条消息 UTF-8 字节上限,超出自动分片 |
 | `bot_prefix` | text | — | 回复消息前缀 |
 | `access_control_dm` | switch | 关 | 开启后新 topic 首条消息需在控制台审批 |

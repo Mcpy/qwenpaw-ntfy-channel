@@ -57,8 +57,12 @@ DEFAULT_BOT_TAG = "qwenpaw-bot"
 # tag 合法字符:与 ntfy topic 字符集一致(URL/日志/正则中安全)
 _TAG_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # @ 寻址提取:整词提取(tag 后遇非法字符即截断),支持 @ 多个、
-# 大小写不敏感;@ 与 tag 之间不能有空格,使用半角 @
-_AT_PATTERN = re.compile(r"@([A-Za-z0-9_-]+)")
+# 大小写不敏感;@ 与 tag 之间不能有空格,使用半角 @。
+# 负向后行断言排除邮箱(user@example.com)、版本号(pkg@1.2.3)、
+# SSH 地址(git@github.com)、URL 用户页(ntfy.sh/@user)等 @ 前紧贴
+# 词字符/点/斜杠的场景——这些不是 @ 提及,误提取会导致整条消息被
+# "定向给别人"规则错误丢弃;合法提及的 @ 前是行首/空白/中文/标点。
+_AT_PATTERN = re.compile(r"(?<![A-Za-z0-9._/-])@([A-Za-z0-9_-]+)")
 # 入站消息 id 去重:防断线重连时 since 重放导致同一消息重复入站。
 # 超过上限时按窗口清理过期记录。
 _DEDUP_WINDOW_SECONDS = 300.0

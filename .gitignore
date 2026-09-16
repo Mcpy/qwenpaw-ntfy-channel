@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .DS_Store
 .env
+NTFY_CHANNEL_TODO.md
+issue_body.md
